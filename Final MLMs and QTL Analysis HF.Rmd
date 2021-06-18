@@ -1,0 +1,1426 @@
+---
+title: "Final MLMs and QTL Analysis"
+author: "Zachary Winn"
+date: "3/26/21"
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+```
+
+# Mixed Linear Models
+
+In this section of the code, I am running a series of mixed linear models to derive BLUEs for each environment and across all environments.
+
+## Read in the Data
+
+Here I read in the data and make sure all variables are of the correct class. The data is of sub-samples taken from a population of $F_{4:5}$ infested with Hessian fly in the Fall of 2019, 2020, and 2021. The following environments were recorded in the following field designs:  
+
+```{r Site-Years, echo=FALSE}
+library(knitr)
+a<-c()
+a<-rbind(a, c("Cunningham", "Kinston", "NC", "2018-2019", 1, "Augmented Block"))
+a<-rbind(a, c("Cunningham", "Kinston", "NC", "2019-2020", 2, "Randomized Complete Block"))
+a<-rbind(a, c("Cunningham", "Kinston", "NC", "2020-2021", 1, "Augmented Block"))
+a<-rbind(a, c("Caswell", "Kinston", "NC", "2019-2020", 2, "Randomized Complete Block"))
+a<-rbind(a, c("Hugo", "Hugo", "NC", "2020-2021", 2, "Randomized Complete Block"))
+a<-as.data.frame(a)
+colnames(a)<-c("Station", "City", "State", "Season", "Replications", "Design")
+kable(a)
+remove(a)
+```
+
+The following traits were measured:  
+
+- Infested Tillers (IT): Number of Hessian fly infested tillers from a sub-sample of a plot
+- Total Tillers (TT): Number of total tillers taken in a sub-sample of a plot
+- Number of Larvae/Pupae (NOP): Number of larvae/pupae in a sub-sample of a plot
+- Percent Infested Tillers (PIT): $PIT=\frac{IT}{TT}$
+- Number of Larvae/Pupae per Tiller (NOPPT): $PIT=\frac{NOP}{TT}$
+- Number of Larvae/Pupae per Infested Tiller (NOPPIT): $PIT=\frac{NOP}{IT}$
+- Normalized Difference Vegetative Index (NDVI): $NDVI=\frac{NIR-Red}{NIR+Red}$ a ratio of near infrared (NIR) and red spectra taken in a single site year via a multi-spectral camera mounted to a tractor (Cunningham 2019-2020) 
+
+**Here we will only analyze PIT, NOPPT, and NOPPIT**
+
+```{r Data Read In, results='hide'}
+#library
+library(asreml)
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(psych)
+
+#read in data
+rm(list = ls())
+setwd("C:/Users/zwinn/OneDrive/North Carolina State University/Dissertation/Hessian Fly QTL Mapping Project/Final Directory and Paper")
+hfpop<-read_excel("2018_2019_2020_2021_HFPOP_site_years.xlsx",
+                  sheet = "All_Site_Years",
+                  na="NA")
+hfpop<-as.data.frame(hfpop)
+
+#set data classes
+hfpop[,1:8]<-lapply(hfpop[,1:8], as.factor)
+hfpop[,9:ncol(hfpop)]<-lapply(hfpop[,9:ncol(hfpop)], as.numeric)
+hfpop<-hfpop %>% 
+  mutate(PIT=as.numeric(round(IT/TT, 2)),
+         NOPPT=as.numeric(round(NOP/TT, 2)),
+         NOPPIT=round(ifelse(IT==0, 0, NOP/IT),2)) %>%
+  select(Environment, Year, Location,
+         Rep, Genotype, Entry,
+         Tray, Row, Plot,
+         VR, TT, IT,
+         NOP, PIT, NOPPT,
+         NOPPIT, NDVI)
+
+lapply(hfpop, class)
+```
+
+## Check normality assumptions
+
+Here I look at the data to see if it is very skewed and requires some form of transformation or a GLMM.
+
+```{r Check Normal Plots, echo=FALSE}
+traits<-colnames(hfpop)[c(14:16)]
+for(i in traits){
+  hist(hfpop[[i]], main=i, xlab=i)
+  boxplot(hfpop[[i]], main=i)
+}
+```
+
+## Run the models within locations
+
+Now I am going to get adjusted means from each environment to run in a QTL analysis. Results will be at the end of the file. 
+
+```{r Within Models}
+env<-levels(hfpop$Environment)
+mlms<-list()
+
+cv <- function(trait_val) {
+  mean_of_trait <- mean(trait_val, na.rm=T)
+  sd_of_trait <- sd(trait_val, na.rm=T)
+  cv_value <- (sd_of_trait/mean_of_trait)*100
+  return(cv_value)
+}
+
+for (j in env){
+  for (i in traits){
+    #Parse out location
+    location<-hfpop %>% filter(Environment==j)
+    location<-as.data.frame(location)
+  
+    #Announce Location Trait Combination
+    print(paste("------- Analyzing trait", i, "in", j,"-------"))
+    
+  if(length(unique(is.na(location[,i])))==1){
+    #Announce decision
+    print(paste(i, " was not taken in ", j, "; aborting loop.", sep = ""))
+  }else{
+    
+  #Check Design
+  if(j=="WIL19"){
+    
+    #Announce decision
+    print(paste(j, "was unreplicated in augmented design, runing augmented block model"))
+    
+    #drop NA
+    location<-location %>% drop_na(i)
+    
+    #Run Model
+    mlm <- asreml(fixed = location[,i]~1+Entry,
+                  random = ~Tray,
+                  residual = ~units,
+                  data=location,
+                  family= asr_inverse.gaussian())
+    
+    #Print Anova Table
+    print(kable(wald(mlm), caption = paste("ANOVA Tabel for", i, "in", j)))
+    
+    #Print Fit Criteria
+    crits<-as.data.frame(rbind(summary(mlm)$loglik,summary(mlm)$aic, summary(mlm)$bic))
+    rownames(crits)<-c("LogLik","AIC","BIC")
+    colnames(crits)<-"Value"
+    print(kable(crits, caption=paste("Fit Criteria Tabel for", i, "in", j)))
+    
+    #Print CV
+    print("CV Expressed as a Percent")
+    print(cv(trait_val = location[,i]))
+    
+    #Print Residuals
+    plot(resid(mlm),main =paste(i, j))
+    
+    i=(paste(i,"_",j,sep = ""))
+    mlms[[i]]<-mlm
+    remove(crits,mlm,location)
+    
+  }else
+    if(j=="CUN21"){
+      
+      #Announce decision
+      print(paste(j, "was unreplicated in augmented design, runing augmented block model"))
+      
+      #drop NA
+      location<-location %>% drop_na(i)
+      
+      #Run Model
+      mlm <- asreml(fixed = location[,i]~1+Entry,
+                    random = ~Tray,
+                    residual = ~units,
+                    data=location,
+                    family= asr_inverse.gaussian())
+      
+      #Print Anova Table
+      print(kable(wald(mlm), caption = paste("ANOVA Tabel for", i, "in", j)))
+      
+      #Print Fit Criteria
+      crits<-as.data.frame(rbind(summary(mlm)$loglik,summary(mlm)$aic, summary(mlm)$bic))
+      rownames(crits)<-c("LogLik","AIC","BIC")
+      colnames(crits)<-"Value"
+      print(kable(crits, caption=paste("Fit Criteria Tabel for", i, "in", j)))
+      
+      #Print CV
+      print("CV Expressed as a Percent")
+      print(cv(trait_val = location[,i]))
+      
+      #Print Residuals
+      plot(resid(mlm),main =paste(i, j))
+      
+      i=(paste(i,"_",j,sep = ""))
+      mlms[[i]]<-mlm
+      remove(crits,mlm,location)
+    
+    }else{
+         
+      #Announce decision
+      print(paste(j, "was replicated in RCBD, runing RCBD model"))
+        
+      #Run Model
+      mlm <- asreml(fixed = location[,i]~1+Entry,
+                    random = ~Rep,
+                    residual = ~units,
+                    data=location,
+                    family= asr_inverse.gaussian())
+      
+      #Print Anova Table
+      print(kable(wald(mlm), caption = paste("ANOVA Tabel for", i, "in", j)))
+      
+      #Print Fit Criteria
+      crits<-as.data.frame(rbind(summary(mlm)$loglik,summary(mlm)$aic, summary(mlm)$bic))
+      rownames(crits)<-c("LogLik","AIC","BIC")
+      colnames(crits)<-"Value"
+      print(kable(crits, caption=paste("Fit Criteria Tabel for", i, "in", j)))
+      
+      #Print CV
+      print("CV Expressed as a Percent")
+      print(cv(trait_val = location[,i]))
+      
+      #Print Residuals
+      plot(resid(mlm),main =paste(i, j))
+      
+      i=(paste(i,"_",j,sep = ""))
+      mlms[[i]]<-mlm
+      remove(crits,mlm,location)
+           
+      }
+    }
+  }
+}
+
+#pull out genotype fixed effect estimates
+#add them to population mean effect intercept
+
+BLUEs_loc<-data.frame(unique(hfpop$Entry))
+colnames(BLUEs_loc)<-"Entry"
+
+for (i in names(mlms)){
+  a<-mlms[[i]]
+  beta_hat<-a$coefficients$fixed
+  beta_0<-beta_hat[grep("(Intercept)", rownames(beta_hat))]
+  beta_1<-beta_hat[grep("Entry", rownames(beta_hat))]
+  BLUEs<-as.data.frame(beta_0+beta_1)
+  rownames(BLUEs)<-gsub("Entry_", "", rownames(beta_hat)[1:nrow(beta_hat)-1])
+  colnames(BLUEs)<-i
+  BLUEs<-rownames_to_column(BLUEs, var="Entry")
+  BLUEs_loc<-left_join(BLUEs_loc, BLUEs, by="Entry")
+  remove(a, beta_hat, beta_0, beta_1, BLUEs)
+}
+
+#remove the NA vectors from the dataframe
+for(i in colnames(BLUEs_loc)){
+  if(sum(is.na(BLUEs_loc[,i]))==length(BLUEs_loc[,i])){
+    BLUEs_loc<-BLUEs_loc %>%
+      select(-i)
+  }else{
+    #do nothing
+  }
+}
+```
+
+## Run the models across all locations
+
+Things seem to check out mostly, although transformation would be a good idea for some of the very skewed data. Lets run the models and see what happens. Results will be at the end of the file. 
+
+```{r Across Models}
+BLUEs_all<-list()
+
+for (i in traits){
+      #Run Model
+      mlm<-asreml(fixed = hfpop[,i]~1+Entry,
+                  random = ~(Location)+
+                    (Year)+
+                    (Rep)+
+                    (Entry:Location)+
+                    (Entry:Year)+
+                    (Year:Location)+
+                    (Entry:Year:Location),
+                  residuals = ~(units),
+                  data = hfpop,
+                  maxit=75,
+                  family= asr_inverse.gaussian())
+      
+      #Print Anova Table
+      print(kable(wald(mlm), caption = paste("ANOVA Tabel for", i, "in", j)))
+      print(summary(mlm))
+      
+      #Print Fit Criteria
+      crits<-as.data.frame(rbind(summary(mlm)$loglik,summary(mlm)$aic, summary(mlm)$bic))
+      rownames(crits)<-c("LogLik","AIC","BIC")
+      colnames(crits)<-"Value"
+      print(kable(crits, caption=paste("Fit Criteria Tabel for", i, "in", j)))
+      
+      #Print Residuals
+      plot(resid(mlm),main =paste("Multienvironment",i))
+      
+      #Pull out estimates
+      beta_hat<-mlm$coefficients$fixed
+      beta_0<-beta_hat[grep("(Intercept)", rownames(beta_hat))]
+      beta_1<-beta_hat[grep("Entry", rownames(beta_hat))]
+      p<-as.data.frame(beta_0+beta_1)
+      rownames(p)<-gsub("Entry_", "", rownames(beta_hat)[1:nrow(beta_hat)-1])
+      colnames(p)<-i
+      p<-rownames_to_column(p, var="Entry")
+      i=(paste(i,"_ME",sep = ""))
+      BLUEs_all[[i]]<-p
+      remove(p,crits,mlm,beta_hat, beta_0, beta_1, BLUEs)
+}
+
+q<-data.frame(unique(hfpop$Entry))
+colnames(q)<-"Entry"
+
+for (i in names(BLUEs_all)){
+  a<-as.data.frame(BLUEs_all[[i]])
+  colnames(a)<-c("Entry",i)
+  q<-merge.data.frame(q,a,all=T)
+  remove(a)
+}
+
+BLUEs_all<-as.data.frame(q)
+remove(q)
+```
+
+## Heritabilities
+
+Here I check the heritabilities of traits using the formula from Fehr's book "Principles of Culitvar Development: Theory and Technique". I run all mixed models as completely random and extract variance components. Per-plot broad sense heritability is calculated by:
+
+$$\frac{(\sigma^2_G)}{(\sigma^2_{G}+\sigma^2_{GL}+\sigma^2_{GY}+\sigma^2_{GLY}+\sigma^2_\varepsilon)}$$
+
+and entry mean broad sense heritability is calculated by:
+
+$$\frac{(\sigma^2_G)}{(\sigma^2_{G}+(\frac{\sigma^2_{GL}}{l})+(\frac{\sigma^2_{GY}}{y})+(\frac{\sigma^2_{GLY}}{l*y})+(\frac{\sigma^2_\varepsilon}{l*y*r}))}$$
+
+```{r Heritabilities}
+#make an empty data frame for the heritability estimates
+h2s<-data.frame(Trait=character(), Type=character(), 
+                Estimation=numeric(), SE=numeric())
+
+
+for (i in traits){
+  print(paste("------- Analyzing trait", i, "-------"))
+  
+  n_loc<-hfpop %>% 
+    select(Environment, Year, Location, i) %>% 
+    drop_na() %>% 
+    distinct(Environment)
+  
+  n_loc=as.numeric(nrow(n_loc))
+  
+  n_rep=n_loc*2
+  
+  n_year=hfpop %>% 
+    select(Environment, Year, Location, i)  %>% 
+    drop_na() %>% 
+    distinct(Year)
+  
+  n_year<-as.numeric(count(n_year))
+  
+  if(((n_year)>=2)){
+    
+    print(paste(i, "has multiple years of data"))
+    
+    mlm<-asreml(fixed = hfpop[,i]~1,
+                random = ~ (Entry)+
+                  (Location)+
+                  (Year)+
+                  (Rep)+
+                  (Entry:Location)+
+                  (Entry:Year)+
+                  (Year:Location)+
+                  (Entry:Year:Location),
+                residuals = ~(units),
+                data = hfpop,
+                maxit=75,
+                family= asr_inverse.gaussian())
+    
+    pph2<-vpredict(mlm, 
+                   h2~V5/(V5+V6+V7+V8+V9))
+    
+    emh2<-vpredict(mlm,
+                   h2~V5/(V5+(V6/n_year)+(V7/n_loc)+(V8/(n_year*n_loc))+(V9/(n_year*n_loc*n_rep))))
+    
+    a<-rbind(pph2,emh2)
+    a<-cbind(data.frame(Trait=c(i, i)), data.frame(Type=c("Per-Plot", "Entry-Mean")), a)
+    h2s<-rbind(h2s,a)
+    
+  }else{
+    
+    print(paste(i, "has a single year of data"))
+    
+    mlm<-asreml(fixed = hfpop[,i]~1,
+                random = ~(Entry)+
+                  (Location)+
+                  (Entry:Location)+
+                  (Rep),
+                residuals = ~ units,
+                data = hfpop,
+                maxit=75)
+    
+    pph2<-vpredict(mlm, 
+                   h2~V3/(V3+V4+V5))
+    
+    emh2<-vpredict(mlm, 
+                   h2~V3/(V3+(V4/n_loc)+(V5/(n_year*n_loc*n_rep))))
+    
+    a<-rbind(pph2,emh2)
+    a<-cbind(data.frame(Trait=c(i, i)), data.frame(Type=c("Per-Plot", "Entry-Mean")), a)
+    h2s<-rbind(h2s,a)
+    }
+}
+
+kable(h2s, row.names = F, caption = "Heritabilities")
+
+write.csv(h2s,"Heritabilities.csv", row.names = F)
+```
+
+
+## Format Genotype Data and Diagnostic Plots
+
+Here I pull in the genotype data and format it to fit the phenotype data
+
+```{r Formatting, fig.width=10, fig.height=5}
+#create dataframe that r/QTL likes
+BLUEs<-full_join(BLUEs_all, BLUEs_loc, by="Entry")
+CHR<-BLUEs[1,]
+CHR[1,2:ncol(CHR)]<-NA
+CHR[,1]<-as.character(CHR[,1])
+CHR[1,1]<-"Chr"
+CHR[,1]<-as.factor(CHR[,1])
+BLUEs<-rbind(BLUEs,CHR)
+colnames(BLUEs)<-str_replace(colnames(BLUEs),"-","_")
+
+#look at correlations among environments
+for (i in traits){
+  if(i=="PIT"){
+  
+    i=paste(i,"_",sep = "")
+    n<-colnames(BLUEs)[(grep(i, colnames(BLUEs)))]
+    n<-n[-grep("NOP", n)]
+    print(pairs.panels(BLUEs[,n], stars = T))
+  
+  }else{
+  
+    i=paste(i,"_",sep = "")
+    pairs.panels(BLUEs[,grep(i,colnames(BLUEs))], stars = T)
+    
+  }
+}
+
+#graphic for publication
+a<-BLUEs[,grep("ME",colnames(BLUEs))]
+colnames(a)<-c("PIT", "NOPPT", "NOPPIT")
+pairs.panels(a,stars = T)
+
+#look at correlations of BLUEs across environments
+pairs.panels(BLUEs[,c(grep("_ME", colnames(BLUEs)), grep("NDVI", colnames(BLUEs)))],
+             stars = T)
+
+#create parental table
+counts<-hfpop %>%
+  filter(Entry=="Shirley"|Entry=="LA03136E71") %>%
+  group_by(Environment, Entry) %>%
+  count(Entry)
+  
+variance<-hfpop %>%
+  filter(Entry=="Shirley"|Entry=="LA03136E71") %>%
+  group_by(Environment, Entry) %>%
+  summarise(varPIT=var(PIT, na.rm = T), varNOPPT=var(NOPPT, na.rm = T), varNOPPIT=var(NOPPIT, na.rm = T))
+
+candv<-full_join(counts,variance)
+
+se<-candv %>% 
+  mutate(SE_PIT=varPIT/sqrt(n)) %>%
+  mutate(SE_NOPPT=varNOPPT/sqrt(n)) %>%
+  mutate(SE_NOPPIT=varNOPPIT/sqrt(n)) %>%
+  select(SE_PIT, SE_NOPPT, SE_NOPPIT)
+
+means<-hfpop %>%
+  filter(Entry=="Shirley"|Entry=="LA03136E71") %>%
+  group_by(Environment, Entry) %>%
+  summarise(PIT=mean(PIT, na.rm=T), NOPPT=mean(NOPPT, na.rm=T), NOPPIT=mean(NOPPIT, na.rm=T))
+
+parents<-full_join(means,se)
+
+means_overall<-hfpop %>%
+  filter(Entry=="Shirley"|Entry=="LA03136E71") %>%
+  group_by(Entry) %>%
+  summarise(PIT=mean(PIT, na.rm=T), NOPPT=mean(NOPPT, na.rm=T), NOPPIT=mean(NOPPIT, na.rm=T))
+
+counts<-hfpop %>%
+  filter(Entry=="Shirley"|Entry=="LA03136E71") %>%
+  group_by(Entry) %>%
+  count(Entry)
+  
+variance<-hfpop %>%
+  filter(Entry=="Shirley"|Entry=="LA03136E71")%>%
+  group_by(Entry) %>%
+  summarise(varPIT=var(PIT, na.rm = T), varNOPPT=var(NOPPT, na.rm = T), varNOPPIT=var(NOPPIT, na.rm = T))
+
+candv<-full_join(counts,variance)
+
+se<-candv %>% 
+  mutate(SE_PIT=varPIT/sqrt(n)) %>%
+  mutate(SE_NOPPT=varNOPPT/sqrt(n)) %>%
+  mutate(SE_NOPPIT=varNOPPIT/sqrt(n)) %>%
+  select(SE_PIT, SE_NOPPT, SE_NOPPIT)
+  
+parents_overall<-full_join(means_overall,se)
+
+parents<-rbind(parents,parents_overall)
+
+write.csv(parents,"Parental Means.csv", row.names = F)
+
+remove(counts, se, candv, 
+       parents_overall, means,
+       means_overall, parents,
+       variance)
+
+#read in VCF
+library(gaston)
+bed <- read.vcf("Shirley_x_LA03_filt.vcf.gz", convert.chr = FALSE)
+structure(bed)
+
+#write out genotype names
+a<-bed@ped$id
+write.csv(a, "Genotype_Names.csv", row.names = F)
+
+#LD prune
+#bed<-LD.thin(bed, threshold = 0.6)
+
+#pull out a vector of only 7D SNPs
+chr7D<-bed@snps
+chr7D<-chr7D %>% filter(chr=="7D") 
+
+library(devtools)
+###install_github("etnite/bwardr")
+library("bwardr")
+
+#find markers with a high level of heterozygotes
+#After Three generations of inbreeding you should expect (assuming HWE)
+#F2-F3
+50*.5
+#F3-F4
+25*.5
+#F4-F5
+12.5*.5
+
+#around 6.25A
+drophz<-bed@snps[(bed@snps$hz>=0.10),]
+drophz<-drophz$id
+
+#find markers with a low minor allele frequency
+dropmaf<-bed@snps[(bed@snps$maf<=0.05),]
+dropmaf<-dropmaf$id
+
+a<-format_qtlmap_geno(bed, par_a="LA03136E71",par_b="SHIRLEY",rm_het=T, rm_miss=T, include_pars=T, out_fmt="rqtl")
+map<-a$abh
+
+#drop SNPs with 10% heterozygosity or more
+map<-map[!(map$id %in% drophz),]
+
+#drop SNPs with a MAF of 10% or less
+map<-map[!(map$id %in% dropmaf),]
+
+#transform map
+map<-as.data.frame(t(map))
+map<-rownames_to_column(map, var="Entry")
+colnames(map)<-map[1,]
+map<-map[-c(1,3),]
+map[1,1]<-"Chr"
+colnames(map)[1]<-"Entry"
+map[,1]<-str_replace(map[,1],"NC131.","")
+map[,1]<-str_replace(map[,1],"SHIRLEY","Shirley")
+map<-rownames_to_column(map, var="dummy")
+map[,1]<-as.numeric(map[,1])
+
+#merge maps
+fullmap<-full_join(BLUEs, map, by="Entry")
+
+#reorder map and clean up
+fullmap<-fullmap[order(fullmap$dummy, decreasing = F),]
+fullmap<-subset(fullmap, select = -c(dummy))
+dropme<-c("Shirley_1","LA03136E71_1")
+fullmap<-fullmap %>% filter(!Entry %in% dropme)
+fullmap[1,1:ncol(BLUEs)]<-""
+
+#remove parents
+fullmap<-fullmap %>% filter(!Entry=="LA03136E71" & !Entry=="Shirley")
+
+#convert allele coding
+fullmap[fullmap=="A"]="AA"
+fullmap[fullmap=="H"]="AB"
+fullmap[fullmap=="B"]="BB"
+
+#create CSV
+write.csv(fullmap,"HF_Geno_Pheno_File.csv", row.names = F)
+
+### Write a seperate file for the 7D chromosome 
+
+#pull in data and subset only the 7D markers with no filtration
+bed <- read.vcf("Shirley_x_LA03_filt.vcf.gz", convert.chr = FALSE)
+a<-format_qtlmap_geno(bed, par_a="LA03136E71",par_b="SHIRLEY",rm_het=T, rm_miss=T, include_pars=T, out_fmt="rqtl")
+a<-a$abh
+colnames(a)[2:3]<-c("chr","blank")
+a<-a %>% filter(chr=="7D")
+map<-a
+
+#transform map
+map<-as.data.frame(t(map))
+map<-rownames_to_column(map, var="Entry")
+colnames(map)<-map[1,]
+map<-map[-c(1,3),]
+map[1,1]<-"Chr"
+colnames(map)[1]<-"Entry"
+map[,1]<-str_replace(map[,1],"NC131.","")
+map[,1]<-str_replace(map[,1],"SHIRLEY","Shirley")
+map<-rownames_to_column(map, var="dummy")
+map[,1]<-as.numeric(map[,1])
+
+#merge maps
+fullmap<-full_join(BLUEs, map, by="Entry")
+
+#reorder map and clean up
+fullmap<-fullmap[order(fullmap$dummy, decreasing = F),]
+fullmap<-subset(fullmap, select = -c(dummy))
+dropme<-c("Shirley_1","LA03136E71_1","183","23","189")
+fullmap<-fullmap %>% filter(!Entry %in% dropme)
+fullmap[1,1:ncol(BLUEs)]<-""
+
+#remove parents
+fullmap<-fullmap %>% filter(!Entry=="LA03136E71" & !Entry=="Shirley")
+
+#convert allele coding
+fullmap[fullmap=="A"]="AA"
+fullmap[fullmap=="H"]="AB"
+fullmap[fullmap=="B"]="BB"
+
+#create CSV
+write.csv(fullmap,"HF_Geno_Pheno_File_7D_Only.csv", row.names = F)
+```
+
+```{r Remove MLM Junk, echo=FALSE}
+remove(a,bed,map,
+       CHR,fullmap,drophz,
+       dropmaf,dropme,env,
+       i,j,traits,
+       chr7D,n,n_loc,
+       n_rep, n_year,
+       emh2,h2s,mlm,pph2,mlms,
+       BLUEs_all, BLUEs_loc)
+```
+
+# QTL Mapping for all chromosomes
+
+Here I take the BLUEs from the first section, and using those estimates for the QTL mapping with the genetic data prepaired in the perivous section.
+
+## Create the genetic map
+
+Now that I have the means aligned to the genotype data, I am going to make genetic maps for the genotype data collected
+
+```{r Genome Map, fig.height=5, fig.width=15}
+#Library packages
+library(qtl)
+library(ASMap)
+library(parallel)
+
+#define cores for parallel processing
+ncor<-detectCores()
+
+#read in map and data
+HF<-read.cross("csv", 
+               file="HF_Geno_Pheno_File.csv",
+               genotypes=c("AA","AB","BB"), 
+               alleles=c("A","B"), 
+               crosstype="f2", 
+               na.strings = c("NA","-"))
+
+#plot map
+geno.image(HF)
+nmar(HF)
+
+#convert to bcfst where F=5
+HF<-convert2bcsft(HF, BC.gen = 0, F.gen = 5, estimate.map = F)
+
+#look at geno info
+tab<-geno.table(HF)
+distorted<-rownames(tab)[tab$P.value>=0.00001]
+
+#pull distorted markers
+HF<-pull.markers(HF, markers = distorted)
+
+#plot map
+geno.image(HF)
+nmar(HF)
+```
+```{r Genome MST, results='hide'}
+#Estimate linkage map
+HFM<- mstmap(HF,
+             pop.type="nRIL",
+             id = "Entry", 
+             p.value = 0.0001,
+             miss.thresh=0.05,
+             chr=c("1A", "1B", "1D", 
+                   "2A", "2B", "2D", 
+                   "3A", "3B", "3D", 
+                   "4A", "4B", "4D", 
+                   "5A", "5B", "5D", 
+                   "6A", "6B", "6D", 
+                   "7A", "7B", "7D"), 
+             anchor = TRUE, 
+             detectBadData = TRUE,
+             bychr = TRUE,
+             trace = FALSE)
+
+
+```
+```{r Genome Map Continued, fig.height=5, fig.width=15}
+HFM<-jittermap(HFM)
+summary(HFM)
+names(HFM$geno)
+
+
+#remove small linkage groups of a specific length
+chrLengths<-c() #set up list for chromosome lengths
+
+for (i in names(HFM$geno)){
+  chrLengths <- c(chrLengths, ncol(HFM$geno[[i]]$data))
+}
+
+#create data frame with number of markers per linkage group
+chrLengths<-as.data.frame(cbind(names(HFM$geno), chrLengths))
+colnames(chrLengths)<-c("chr", "n_markers") 
+chrLengths$n_markers<-as.numeric(chrLengths$n_markers) 
+chrLengths<-chrLengths[chrLengths$n_markers>=5,] 
+
+#new number of linkage groups
+nrow(chrLengths)
+chrLengths
+
+#subset the map with the linkage groups that pass the filter
+HFM<-subset(HFM, chr = chrLengths$chr)
+HFM<-jittermap(HFM) 
+summary(HFM)
+
+#rename linkage groups
+#Names(HFM$geno) <- c("1A","1B", "1D", 
+#                     "2A", "2B", "2D", 
+#                     "3A", "3B", "3D", 
+#                     "4A", "4B", "4D", 
+#                     "5A", "5B", "5D", 
+#                     "6A", "6B", "6D", 
+#                     "7A", "7B", "7D")
+
+#remove junk
+remove(chrLengths)
+
+#Get the names of things in your data set
+names(HFM$pheno)
+names(HFM)
+names(HFM$geno)
+
+#get the number of things in your data set
+nphe(HFM)
+nind(HFM)
+nchr(HFM)
+totmar(HFM)
+
+#plot the distribution and map of markers in your data set
+summary(HFM)
+plotMap(HFM, horizontal = FALSE, shift = FALSE, main="LA03136E71 x Shirley Mapping Population Linkage Map")
+geno.image(HFM, main="LA03136E71 x Shirley Haplotypes")
+write.cross(HFM, "ASMap output",format = "csv")
+
+#check if the markers are in the correct potion 
+mn<-markernames(HFM)
+pos<-find.markerpos(HFM,mn)
+pos<-rownames_to_column(pos,var="BP_Location")
+pos<-pos %>% mutate(Marker_Name=BP_Location) %>% separate(BP_Location, into =c("a","b"), sep = "_")
+colnames(pos)<-c("trash","BP","Chr","cM","Marker")
+pos<-pos %>% select(Marker,Chr, BP, cM)
+pos[,1:2]<-lapply(pos[,1:2], as.character)
+pos[,3:4]<-lapply(pos[,3:4], as.numeric)
+
+library(lattice)
+xyplot(BP~cM|Chr, pos, pch=15, main="BP vs. cM", col = "blue")
+write.csv(pos,"cM_vs_bp.csv",row.names = F)
+
+#Check linkage group orientation and flip as needed
+chr<-names(HFM$geno)
+for (i in chr){
+  q<-subset(pos, pos$Chr==i)
+  if (q[1,3]>q[(nrow(q)),3]){
+    HFM<-flip.order(HFM, i)
+    print(paste("Chromsome",i,"has been flipped"))
+    remove(q)
+  }else{
+    print(paste("Chromsome",i,"is in correct order"))
+    remove(q)
+  }
+}
+
+#Recheck Graph
+mn<-markernames(HFM)
+pos<-find.markerpos(HFM,mn)
+pos<-rownames_to_column(pos,var="BP_Location")
+pos<-pos %>% mutate(Marker_Name=BP_Location) %>% separate(BP_Location, into =c("a","b"), sep = "_")
+colnames(pos)<-c("trash","BP","Chr","cM","Marker")
+pos<-pos %>% select(Marker,Chr, BP, cM)
+pos[,1:2]<-lapply(pos[,1:2], as.character)
+pos[,3:4]<-lapply(pos[,3:4], as.numeric)
+
+library(lattice)
+xyplot(BP~cM|Chr, pos, pch=15, main="BP vs. cM", col = "blue")
+write.csv(pos,"cM_vs_bp.csv",row.names = F)
+
+#number of cM
+a<-0
+
+for (i in names(HFM$geno)){
+  b<-max(HFM$geno[[i]]$map)
+  a<-a+b
+}
+
+print(paste("The linkage map has a total of", round(a,2), "cM"))
+remove(a,b)
+```
+
+## Run Interval Mapping
+
+Here I run several IM scans for all phenotypes.
+
+```{r Genome Interval Mapping,fig.height=5, fig.width=15}
+#calculate marker probabilities
+HFM<-calc.genoprob(HFM, step=2.0, off.end=0.0, error.prob=1.0e-4, map.function="kosambi",stepwidth="fixed")
+
+#calculate marker probabilities for a simulated genotype
+HFM<-sim.geno(HFM, n.draws = 32, step = 2, off.end = 0.0, error.prob=1.0e-4, map.function="kosambi", stepwidth="fixed")
+
+#set up list
+traits<-colnames(HFM$pheno)[2:ncol(HFM$pheno)]
+IM<-list()
+IMPRMS<-list()
+IMQTL<-list()
+IMTHRESH<-list()
+
+#run scans
+for (i in traits){
+   print(paste("------------ Interval Mapping of", i,"------------"))
+   print("Interval Mapping...")
+   scans<-scanone(HFM, 
+                  pheno.col = i, 
+                  model = "normal", 
+                  method = "hk")
+   print("Done")
+   print("Permutational Interval Mapping...")
+   perms<-scanone(HFM, 
+                  pheno.col = i, 
+                  model = "normal", 
+                  method = "hk", 
+                  n.perm = 1000)
+   print("Done")
+   print("Plotting...")
+   threshold<-summary(perms, alpha=0.05)
+   plot(scans,main=paste("IM for", i))
+   abline(h=threshold, lty="dotted", lwd=1, col="#cc0000")
+   legend("topleft",legend=c("p=0.05"),col = c("#cc0000"),lty = "dotted")
+   print("Done")
+   print("Defining QTL...")
+   qtl<-summary(scans, perm=perms, lodcolum=1, alpha=0.05)
+   print(summary(scans, perm=perms, lodcolum=1, alpha=0.05))
+   print("Done")
+   if (nrow(qtl)==0){
+     print(paste("No QTl were found for", i))
+     remove(scans,perms,threshold,qtl)
+   }else{   
+   print("Drawing QTL...")
+   colnames(scans)<-c("chr","pos","lod")
+   IM[[i]]<-scans
+   IMPRMS[[i]]<-perms
+   IMQTL[[i]]<-qtl
+   IMTHRESH[[i]]<-threshold
+   c<-qtl[,1]
+   p<-qtl[,2]
+   a<-subset(HFM, chr=c)
+   a<-sim.geno(a, n.draws = 32, step = 2, 
+                 off.end = 0.0, error.prob=1.0e-4, 
+                 map.function="kosambi", stepwidth="fixed")
+   madeqtl<-makeqtl(a, c, p, qtl.name = rownames(qtl), what = c("draws", "prob"))
+   plot(madeqtl, chr = c, horizontal= FALSE, 
+        shift= FALSE, show.marker.names= FALSE, 
+        alternate.chrid= FALSE, justdots= FALSE, 
+        main=paste("Interval Mapping QTL for", i ))
+   print("Done")
+   print("Running Drop-One QTL Analysis")
+   qtlfit<-fitqtl(a, qtl=madeqtl, pheno.col = i, get.ests = T,
+                  model="normal", method = "imp")
+   print(summary(qtlfit))
+   remove(scans,perms,threshold,qtl,c,p,a,madeqtl,qtlfit)
+   print("Done")
+   }
+}
+
+#Make an object of all scans for drawing
+IMLOD<-as.data.frame(rownames(IM$PIT_ME))
+IMLOD<-cbind(IMLOD, as.data.frame(IM$PIT_ME))
+rownames(IMLOD)<-c()
+IMLOD<-IMLOD[,1:3]
+colnames(IMLOD)[1]<-"Marker_Location"
+
+traits<-names(IM)
+
+for (i in traits){
+  q<-as.data.frame(IM[[i]])
+  if(nrow(q)==0){
+    print(paste(i, "not detected"))
+  }else{
+  print(paste("Adding", i))
+  q<-rownames_to_column(q, var="Marker_Location")
+  q<-q %>% select(Marker_Location,lod)
+  colnames(q)[2]<-paste("LOD",i,sep="_")
+  IMLOD<-full_join(IMLOD,q, by="Marker_Location")
+  }
+}
+
+j<-data.frame(Marker_Location=character(),chr=character(),pos=numeric(),lod=numeric(),Trait=character())
+
+for (i in traits){
+  m<-IM[[i]]
+  m<-m %>%  rownames_to_column(var="Marker_Location") %>% mutate(Trait=i)
+  j<-bind_rows(j,m)
+  remove(m)
+}
+q<-as.character(IMQTL$PIT_ME$chr)
+j<-j %>% filter(chr==q)
+
+ggplot(data=j, aes(x=pos, y=lod, col=Trait))+
+  geom_line()+
+  geom_hline(yintercept = 5, col="red", lty="dotted", lwd=1)+
+  facet_wrap(~ chr, nrow = 1, scales="fixed")+
+  geom_rug(mapping = aes(x=pos), outside = F, sides = "bottom", show.legend = T)+
+  xlab("Chromosomes")+
+  ylab("LOD")+
+  labs(title = paste(q ,"Interval Mapping Scans With QTL"))
+
+fullgeno<-list(IM,IMPRMS,IMTHRESH,IMQTL)
+names(fullgeno)<-c("IM","IMPRMS","IMTHRESH","IMQTL")
+```
+
+# QTL mapping for 7D alone
+
+Since there was only a single big peak on 7D for all traits, here I will do the same thing as above but with only the 7D chromosome and all available markers. 
+
+## Make the map
+
+```{r 7D Map, fig.height=5, fig.width=15}
+#Library packages
+library(qtl)
+library(ASMap)
+library(parallel)
+
+#define cores for parallel processing
+ncor<-detectCores()
+
+#read in map and data
+HF<-read.cross("csv", 
+               file="HF_Geno_Pheno_File_7D_Only.csv",
+               genotypes=c("AA","AB","BB"), 
+               alleles=c("A","B"), 
+               crosstype="f2",
+               na.strings = c("NA","-"))
+
+#plot map
+geno.image(HF)
+
+#convert to bcfst where F=5
+HF<-convert2bcsft(HF, BC.gen = 0, F.gen = 5, estimate.map = F)
+
+#look at geno info
+tab<-geno.table(HF)
+distorted<-rownames(tab)[tab$P.value>=0.000001]
+
+#pull distorted markers
+HF<-pull.markers(HF, markers = distorted)
+
+#plot map
+geno.image(HF)
+```
+
+## Clean the genotypes
+
+Here I am going to attempt to clean up the calling to reduce the size of the map and make a cleaner peak for the QTL
+
+```{r Clean Up 7D}
+Markers<-as.matrix(pull.geno(HF, chr="7D"))
+
+#here I am going to correlate 
+#the marker calls of each
+#marker to the next marker
+#essentially if the markers are accurate
+#we should not see any correlation 
+#in either the positive or negative 
+#direction
+
+#set thresh
+thresh=0.90
+drop_me<-c()
+
+for (i in 1:(ncol(Markers)-1)){
+  j=i+1
+  corr<-cor(Markers[,i:j], use = "complete.obs")
+  if((corr[1,2])>=thresh){
+  drop_me<-rbind(drop_me,colnames(Markers)[j])  
+  }else
+    if((corr[1,2])<=-thresh){
+    drop_me<-rbind(drop_me,colnames(Markers)[j]) 
+    }else{
+    print(paste(colnames(Markers)[j], "is good"))
+    }
+}
+
+HF<-drop.markers(HF, drop_me)
+
+#remove drop_me
+remove(drop_me)
+
+#number of markers left
+nmar(HF)
+
+#plot map
+geno.image(HF)
+```
+
+## Continue with making the map
+
+```{r 7D MST, results='hide'}
+#Estimate linkage map
+HFM<- mstmap(HF,
+             id = "Entry", 
+             p.value = 0.0001,
+             miss.thresh=0.1,
+             chr=c("7D"), 
+             anchor = TRUE, 
+             detectBadData = TRUE,
+             bychr = TRUE)
+```
+```{r 7D Map Continued, fig.height=5, fig.width=15}
+#remove small linkage groups of a specific length
+chrLengths<-c() #set up list for chromosome lengths
+
+for (i in names(HFM$geno)){
+  chrLengths <- c(chrLengths, ncol(HFM$geno[[i]]$data))
+}
+
+#create data frame with number of markers per linkage group
+chrLengths<-as.data.frame(cbind(names(HFM$geno), chrLengths))
+colnames(chrLengths)<-c("chr", "n_markers") 
+chrLengths$n_markers<-as.numeric(chrLengths$n_markers) 
+chrLengths<-filter(chrLengths, n_markers > 6) 
+
+#new number of linkage groups
+nrow(chrLengths)
+chrLengths
+
+#subset the map with the linkage groups that pass the filter
+HFM<-subset(HFM, chr = chrLengths$chr)
+HFM<-jittermap(HFM) 
+summary(HFM)
+
+#rename linkage groups
+names(HFM$geno) <- c("7D")
+
+#remove junk
+remove(chrLengths)
+
+#Get the names of things in your data set
+names(HFM$pheno)
+names(HFM)
+names(HFM$geno)
+
+#get the number of things in your data set
+nphe(HFM)
+nind(HFM)
+nchr(HFM)
+totmar(HFM)
+
+#plot the distribution and map of markers in your data set
+summary(HFM)
+library(LinkageMapView)
+lmv.linkage.plot(HFM, "HFM_LM.pdf")
+geno.image(HFM, main="LA03136E71 x Shirley Haplotypes")
+
+#check if the markers are in the correct potion 
+mn<-markernames(HFM)
+pos<-find.markerpos(HFM,mn)
+pos<-rownames_to_column(pos,var="BP_Location")
+pos<-pos %>% mutate(Marker_Name=BP_Location) %>% separate(BP_Location, into =c("a","b"), sep = "_")
+colnames(pos)<-c("trash","BP","Chr","cM","Marker")
+pos<-pos %>% select(Marker,Chr, BP, cM)
+pos[,1:2]<-lapply(pos[,1:2], as.character)
+pos[,3:4]<-lapply(pos[,3:4], as.numeric)
+pos<- pos %>% mutate(MBP=BP/1000000)
+
+library(lattice)
+xyplot(MBP~cM|Chr, pos, pch=1, col = "black")
+write.csv(pos,"cM_vs_bp_7D_Only.csv",row.names = F)
+
+#Check linkage group orientation and flip as needed
+
+chr<-names(HFM$geno)
+for (i in chr){
+  q<-subset(pos, pos$Chr==i)
+  if (q[1,3]>q[(nrow(q)),3]){
+    HFM<-flip.order(HFM, i)
+    print(paste("Chromsome",i,"has been flipped"))
+    remove(q)
+  }else{
+    print(paste("Chromsome",i,"is in correct order"))
+    remove(q)
+  }
+}
+
+#write out cross object
+write.cross(HFM, "ASMap_output_only_7D",format = "csv")
+```
+
+## Run Interval Mapping
+
+```{r 7D Interval Mapping, fig.height=5, fig.width=15}
+#calculate marker probabilities
+HFM<-calc.genoprob(HFM, step=2.0, off.end=0.0, error.prob=1.0e-4, map.function="kosambi",stepwidth="fixed")
+
+#calculate marker proabilities for a simulated genotype
+HFM<-sim.geno(HFM, n.draws = 32, step = 2, off.end = 0.0, error.prob=1.0e-4, map.function="kosambi", stepwidth="fixed")
+
+#library
+library(parallel)
+
+#set up list
+traits<-colnames(HFM$pheno)[2:ncol(HFM$pheno)]
+IM<-list()
+IMPRMS<-list()
+IMQTL<-list()
+IMTHRESH<-list()
+ncor<-detectCores()
+
+#run scans
+for (i in traits){
+   print(paste("------------ Interval Mapping of", i,"------------"))
+   print("Interval Mapping...")
+   scans<-scanone(HFM, 
+                  pheno.col = i, 
+                  model = "normal", 
+                  method = "hk")
+   print("Done")
+   print("Permutational Interval Mapping...")
+   perms<-scanone(HFM, 
+                  pheno.col = i, 
+                  model = "normal", 
+                  method = "hk", 
+                  n.perm = 1000)
+   print("Done")
+   print("Plotting...")
+   threshold<-summary(perms, alpha=0.05)
+   plot(scans,main=paste("IM for", i))
+   abline(h=threshold, lty="dotted", lwd=1, col="#cc0000")
+   legend("topright",legend=c("p=0.05"),col = c("#cc0000"),lty = "dotted")
+   print("Done")
+   print("Defining QTL...")
+   qtl<-summary(scans, perm=perms, lodcolum=1, alpha=0.05)
+   print(summary(scans, perm=perms, lodcolum=1, alpha=0.05))
+   print("Done")
+   if (nrow(qtl)==0){
+     print(paste("No QTl were found for", i))
+     remove(scans,perms,threshold,qtl)
+   }else{   
+   print("Drawing QTL...")
+   colnames(scans)<-c("chr","pos","lod")
+   IM[[i]]<-scans
+   IMPRMS[[i]]<-perms
+   IMTHRESH[[i]]<-threshold
+   c<-qtl[,1]
+   p<-qtl[,2]
+   a<-subset(HFM, chr=c)
+   a<-sim.geno(a, n.draws = 32, step = 2, 
+                 off.end = 0.0, error.prob=1.0e-4, 
+                 map.function="kosambi", stepwidth="fixed")
+   madeqtl<-makeqtl(a, c, p, qtl.name = rownames(qtl), what = c("draws", "prob"))
+   plot(madeqtl, chr = c, horizontal= FALSE, 
+        shift= FALSE, show.marker.names= FALSE, 
+        alternate.chrid= FALSE, justdots= FALSE, 
+        main=paste("Interval Mapping QTL for", i ))
+   IMQTL[[i]]<-madeqtl
+   print("Done")
+   print("Running Drop-One QTL Analysis")
+   qtlfit<-fitqtl(a, qtl=madeqtl, pheno.col = i, get.ests = T,
+                  model="normal", method = "imp")
+   print(summary(qtlfit))
+   remove(scans,perms,threshold,qtl,c,p,a,madeqtl,qtlfit)
+   print("Done")
+   }
+}
+```
+
+## Pull Out Effect Estimates
+
+```{r}
+ests<-c()
+for (i in traits){
+  a<-fitqtl(HFM, qtl=IMQTL[[i]], pheno.col = i, method = "imp", dropone = F, get.ests = T)
+  summary(a)
+  PEAK<-find.marker(HFM, chr = IMQTL[[i]]$chr, pos=IMQTL[[i]]$pos)
+  POS<-find.markerpos(HFM, PEAK)
+  BAYES<-as.data.frame(bayesint(IM[[i]], chr = as.character(IMQTL[[i]]$chr), prob = 0.999))
+  BAYES_L<-find.marker(HFM, chr = IMQTL[[i]]$chr, pos = BAYES$pos[1])
+  BAYES_R<-find.marker(HFM, chr = IMQTL[[i]]$chr, pos = BAYES$pos[3])
+  BAYES_C<-find.marker(HFM, chr = IMQTL[[i]]$chr, pos = BAYES$pos[2])
+  EFF<-a$ests$ests[2]
+  SE<-sqrt(a$ests$covar[2,2])
+  BAYES_LEN<-round(find.markerpos(HFM, BAYES_R)$pos-find.markerpos(HFM, BAYES_L)$pos,2)
+  LOD<-round(a$result.full[1,4],2)
+  VAR<-round(a$result.full[1,5],2)
+  PVAL<-a$result.full[1,7]
+  CHOP<-as.data.frame(strsplit(i,split = "_"))
+  ENV<-CHOP[2,1]
+  TRAIT<-CHOP[1,1]
+  BP_LEN<-abs(as.numeric(as.data.frame(strsplit(BAYES_R,split = "_"))[2,1])-as.numeric(as.data.frame(strsplit(BAYES_L,split = "_"))[2,1]))/1000000
+  a<-c(TRAIT, ENV, BAYES_L, BAYES_C ,BAYES_R, BAYES_LEN, BP_LEN, LOD, VAR, EFF, SE)
+  a<-as.data.frame(t(a))
+  colnames(a)<-c("Trait", "Environment", 
+                 "Left Flanking Marker", "Approximate Peak Marker" ,"Right Flanking Marker",
+                 "Length (cM)", "Length (Mbp)",
+                 "LOD", "Percent Variation", "Effect Estimate", "SE")
+  ests<-rbind(ests, a)
+  remove(PEAK, POS, BAYES,
+         BAYES_L, BAYES_R, BAYES_LEN,
+         LOD, VAR, PVAL, CHOP,
+         ENV, BP_LEN,a)
+}
+
+kable(ests)
+
+write.csv(ests, "QTL Regions.csv", row.names = F)
+```
+
+## Draw Figures
+
+Now I am going to draw some figures for the QTL identified in this run. 
+
+```{r Plots, , fig.height=5, fig.width=15, echo=FALSE}
+#library
+library(ggrepel)
+library(ggthemes)
+
+#list of used markers
+a<-as.matrix(HFM$geno$`7D`$map)
+a
+write.csv(a,"Marker Names and Positions.csv")
+
+#Mutltiscan plot
+IMLOD7D<-as.data.frame(rownames(IM$PIT_ME))
+IMLOD7D<-cbind(IMLOD7D, as.data.frame(IM$PIT_ME))
+rownames(IMLOD7D)<-c()
+IMLOD7D<-IMLOD7D[,1:3]
+colnames(IMLOD7D)[1]<-"Marker_Location"
+
+traits<-names(IM)
+
+for (i in traits){
+  q<-as.data.frame(IM[[i]])
+  if(nrow(q)==0){
+    print(paste(i, "not detected"))
+  }else{
+  print(paste("Adding", i))
+  q<-rownames_to_column(q, var="Marker_Location")
+  q<-q %>% select(Marker_Location,lod)
+  colnames(q)[2]<-paste("LOD",i,sep="_")
+  IMLOD7D<-full_join(IMLOD7D,q, by="Marker_Location")
+  }
+}
+
+j<-data.frame(Marker_Location=character(),chr=character(),pos=numeric(),lod=numeric(),Trait=character())
+
+for (i in traits){
+  m<-IM[[i]]
+  m<-m %>%  rownames_to_column(var="Marker_Location") %>% mutate(Trait=i)
+  j<-bind_rows(j,m)
+  remove(m)
+}
+q<-as.character(IMQTL$PIT_ME$chr)
+j<-j %>% filter(chr==q)
+
+ggplot(data=j, aes(x=pos, y=lod, col=Trait))+
+  geom_point(aes(shape=Trait),size=1)+
+  scale_shape_manual(values=1:length(unique(j$Trait)))+
+  geom_line(aes(group=Trait))+
+  geom_hline(yintercept = 5, col="red", lty="dotted", lwd=1)+
+  facet_wrap(~ chr, nrow = 1, scales="fixed")+
+  xlab("Position (cM)")+
+  ylab("LOD")+
+  scale_x_continuous(breaks = seq(0, 300, by = 25))+
+  theme(legend.title = element_blank())
+
+j<-j[grep("_ME", j$Trait),]
+
+ggplot(data=j, aes(x=pos, y=lod, col=Trait))+
+  geom_point(aes(shape=Trait),size=1)+
+  scale_shape_manual(values=1:length(unique(j$Trait)))+
+  geom_line(aes(group=Trait))+
+  geom_hline(yintercept = 5, col="red", lty="dotted", lwd=1)+
+  facet_wrap(~ chr, nrow = 1, scales="fixed")+
+  xlab("Position (cM)")+
+  ylab("LOD")+
+  scale_x_continuous(breaks = seq(0, 300, by = 20))+
+  theme(legend.title = element_blank())
+
+#QTL confidence interval plot
+QTL<-data.frame(markers=character(), chr=character(), pos=numeric(), lod=numeric(), trait=character())
+
+for (p in traits){
+
+k<-IMQTL[[p]]
+l<-IM[[p]]
+m<-IMPRMS[[p]]
+n<-length(k$name)
+
+  for (i in 1:n){
+  print(paste("QTL Region on", as.character(k$chr[i]), "for", p))
+  a<-as.data.frame(bayesint(l, chr = as.character(k$chr[i]), prob = 0.999))
+  a<-rownames_to_column(a, var="markers")
+  a<-a %>% mutate(trait=p)
+  z=paste("QTL_Region_on", as.character(as.data.frame(summary(k))[i,2]), "for", p, sep = "_")
+  QTL<-rbind(QTL,a)
+  }
+}
+
+QTL[,5]<-as.factor(QTL[,5])
+
+OAQTLPOS<-IM$PIT_ME
+OAQTLPOS<-rownames_to_column(OAQTLPOS, var="Marker_Location")
+OAQTLPOS<-OAQTLPOS[,1:3]
+
+for (i in levels(QTL$trait)){
+  p<-IM$PIT_ME
+  p<-rownames_to_column(p, var="Marker_Location")
+  p<-p[,1:3]
+  q<-QTL %>% filter(trait==i)
+  a<-min(q$p)
+  b<-max(q$p)
+  p<-p %>% filter(pos>=a & pos<=b) %>% mutate(id=1)
+  colnames(p)[4]<-i
+  p<-p %>% select(Marker_Location, i)
+  j<-full_join(OAQTLPOS,p,by="Marker_Location", keep=FALSE)
+  j<-j %>% select(Marker_Location, i)
+  OAQTLPOS<-full_join(OAQTLPOS, j, by="Marker_Location", keep=FALSE)
+  remove(p,q,a,b)
+}
+
+j<-data.frame(Marker_Location=character(),chr=character(),pos=numeric(),QTL=numeric(),Trait=character())
+
+for (i in levels(QTL$trait)){
+  m<-as.data.frame(OAQTLPOS[,c("Marker_Location","chr","pos",i)])
+  m<-m %>% mutate(Trait=i)
+  colnames(m)[4]<-"QTL"
+  j<-bind_rows(j,m)
+  remove(m)
+}
+
+j<-drop_na(j)
+d<-IM$PIT_ME
+d<-d %>% mutate(Trait="Chromosome_Length")
+d<-d %>% 
+  filter(pos<=40) %>%
+  rownames_to_column(var="Marker")
+d<-d[-grep("loc", d$Marker),]
+d<-d %>% mutate(Marker=paste(Marker, " (", round(pos,2), " cM)", sep = ""))
+
+
+
+ggplot(data=j, aes(x=pos, y=Trait))+
+  geom_line(lty=1, lwd=2)+
+  xlab("")+
+  ylab("")+
+  scale_x_continuous(breaks = d$pos,
+                     labels = d$Marker, 
+                     limits = c(min(d$pos),max(d$pos)))+
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none")+
+  scale_y_discrete(limits=rev)
+
+```
+
+## Answering Questions for Publication
+
+```{r questions}
+traits<-c("TT", "IT", "NOP")
+for (i in traits){
+
+  L<-hfpop %>%
+    filter(Entry=="LA03136E71") %>%
+    select(i) %>%
+    drop_na()
+  S<-hfpop %>%
+    filter(Entry=="Shirley") %>%
+    select(i) %>%
+    drop_na()
+
+  print(t.test(L,S,var.equal = F, conf.level = .95))
+    
+}
+
+L<-hfpop %>%
+  filter(Entry=="LA03136E71") %>%
+  select(NOPPT, NOPPIT) %>%
+  drop_na()
+
+range(L$NOPPT)
+range(L$NOPPIT)
+mean(L$NOPPT)
+mean(L$NOPPIT)
+```
+
+```{r Save Final Workspace, echo=FALSE}
+save.image("Final_Workspace.env")
+```
